@@ -6,21 +6,35 @@
 #include <sys/wait.h>
 #include <sys/types.h>
 #include <cstdlib>
+#include <signal.h>
+
+void handle_sigchld(int) {
+    while (waitpid(-1, nullptr, WNOHANG) > 0) {
+    }
+}
 
 int main()
 {
-    while (true) {
-        std::string line;
+    struct sigaction s;
+    sa.sa_handler = handle_sigchld;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = SA_RESTART | SA_NOCLDSTOP;
 
+    if(sigaction(SIGCHLD, &sa, nullptr) == -1) {
+        perror("sigaction");
+        exit(EXIT_FAILURE);
+    }
+    
+    while (true) {
+
+        std::string line;
         std::cout << "shell> ";
 
-        // EOF Handling (Ctrl + D)
         if (!std::getline(std::cin, line)) {
             std::cout << "\n";
             break;
         }
 
-        // Ignore empty input
         if (line.empty()) {
             continue;
         }
@@ -34,64 +48,78 @@ int main()
             tokens.push_back(word);
         }
 
+        bool background = false;
+
+        if (!tokens.empty() && tokens.back() == "&") {
+            background = true;
+            tokens.pop_back();
+        }
+
+        if (tokens.empty()) {
+            continue;
+        }
+
         if (tokens[0] == "exit") {
             break;
         }
+
         else if (tokens[0] == "cd") {
-            // handle chdir
-            if (tokens.size() > 2) 
-                std::cerr << "cd: too many arguments\n",
+
+            if (tokens.size() > 2) {
+                std::cerr << "cd: too many arguments\n";
                 continue;
-            
-            else if ( tokens.size() == 1) {
+            }
+
+            if (tokens.size() == 1) {
                 const char* home = getenv("HOME");
-                if (home == nullptr || chdir(home) == -1){
+                if (!home || chdir(home) == -1) {
+                    perror("cd");
+                }
+            } else {
+                if (chdir(tokens[1].c_str()) == -1) {
                     perror("cd");
                 }
             }
-            else {
-                // "cd someDir"
-                if (chdir(tokens[1].c_str()) == -1){
-                    perror("cd");
-                }
-            }
+
             continue;
         }
-        else if (tokens[0] == "pwd"){
+
+        else if (tokens[0] == "pwd") {
+
             char cwd[1024];
             if (getcwd(cwd, sizeof(cwd)) != nullptr) {
                 std::cout << cwd << std::endl;
-            }
-            else {
+            } else {
                 perror("pwd");
             }
+
             continue;
         }
+
         else {
-            // Convert to char* array for exec
             std::vector<char*> args;
             for (auto& token : tokens) {
                 args.push_back(const_cast<char*>(token.c_str()));
             }
-            args.push_back(nullptr);  // Null terminate
-    
+            args.push_back(nullptr);
+
             pid_t pid = fork();
-    
+
             if (pid < 0) {
                 perror("fork");
                 continue;
             }
             else if (pid == 0) {
-                // Child
                 execvp(args[0], args.data());
-    
-                // Only runs if exec fails
                 perror("execvp");
                 exit(EXIT_FAILURE);
             }
             else {
-                // Parent
-                waitpid(pid, nullptr, 0);
+                if (!background) {
+                    waitpid(pid, nullptr, 0);
+                } else {
+                    std::cout << "[Background PID: " << pid << "]\n";
+                }
             }
         }
     }
