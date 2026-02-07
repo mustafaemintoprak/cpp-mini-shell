@@ -8,16 +8,16 @@
 #include <sys/types.h>
 #include <cstdlib>
 #include <signal.h>
+#include <fcntl.h>
 
 void handle_sigchld(int) {
     while (waitpid(-1, nullptr, WNOHANG) > 0) {
-        // Reap all finished background children
+        // Reap finished background children
     }
 }
 
 int main() {
 
-    // Install SIGCHLD handler
     struct sigaction sa;
     sa.sa_handler = handle_sigchld;
     sigemptyset(&sa.sa_mask);
@@ -40,7 +40,6 @@ int main() {
 
         if (line.empty()) continue;
 
-        // Tokenize
         std::vector<std::string> tokens;
         std::istringstream iss(line);
         std::string word;
@@ -50,7 +49,6 @@ int main() {
 
         if (tokens.empty()) continue;
 
-        // Background detection
         bool background = false;
         if (tokens.back() == "&") {
             background = true;
@@ -59,10 +57,10 @@ int main() {
 
         if (tokens.empty()) continue;
 
-        // Built-ins
-        if (tokens[0] == "exit") {
+        // ================= BUILT-INS =================
+
+        if (tokens[0] == "exit")
             break;
-        }
 
         if (tokens[0] == "cd") {
             if (tokens.size() > 2) {
@@ -78,7 +76,6 @@ int main() {
                 if (chdir(tokens[1].c_str()) == -1)
                     perror("cd");
             }
-
             continue;
         }
 
@@ -91,7 +88,8 @@ int main() {
             continue;
         }
 
-        // Check for pipeline
+        // ================= PIPELINE CHECK =================
+
         bool has_pipe = false;
         for (const auto& t : tokens) {
             if (t == "|") {
@@ -100,7 +98,7 @@ int main() {
             }
         }
 
-        // ================= PIPELINE =================
+        // ================= PIPELINE PATH =================
         if (has_pipe) {
 
             if (background) {
@@ -108,7 +106,6 @@ int main() {
                 continue;
             }
 
-            // Split into commands
             std::vector<std::vector<std::string>> commands;
             commands.emplace_back();
 
@@ -132,8 +129,6 @@ int main() {
             }
 
             int n = commands.size();
-
-            // Create pipes
             std::vector<std::array<int,2>> pipes(n - 1);
 
             bool error = false;
@@ -173,15 +168,12 @@ int main() {
 
                 if (pid == 0) {
 
-                    // Connect input
                     if (i > 0)
                         dup2(pipes[i - 1][0], STDIN_FILENO);
 
-                    // Connect output
                     if (i < n - 1)
                         dup2(pipes[i][1], STDOUT_FILENO);
 
-                    // Close all pipe fds
                     for (int k = 0; k < n - 1; ++k) {
                         close(pipes[k][0]);
                         close(pipes[k][1]);
@@ -195,7 +187,6 @@ int main() {
                 pids.push_back(pid);
             }
 
-            // Parent closes pipes
             for (int i = 0; i < n - 1; ++i) {
                 close(pipes[i][0]);
                 close(pipes[i][1]);
@@ -209,10 +200,92 @@ int main() {
             continue;
         }
 
-        // ================= NORMAL COMMAND =================
+        // ================= NORMAL COMMAND WITH REDIRECTION =================
+
         std::vector<char*> args;
-        for (auto& t : tokens)
-            args.push_back(const_cast<char*>(t.c_str()));
+        int input_fd = -1;
+        int output_fd = -1;
+
+        bool syntax_error = false;
+
+        for (size_t i = 0; i < tokens.size(); ++i) {
+
+            if (tokens[i] == "<") {
+
+                if (i + 1 >= tokens.size()) {
+                    std::cerr << "syntax error: expected file after '<'\n";
+                    syntax_error = true;
+                    break;
+                }
+
+                input_fd = open(tokens[i + 1].c_str(), O_RDONLY);
+                if (input_fd < 0) {
+                    perror("open");
+                    syntax_error = true;
+                    break;
+                }
+
+                ++i; // skip filename
+            }
+
+            else if (tokens[i] == ">") {
+
+                if (i + 1 >= tokens.size()) {
+                    std::cerr << "syntax error: expected file after '>'\n";
+                    syntax_error = true;
+                    break;
+                }
+
+                output_fd = open(tokens[i + 1].c_str(),
+                                 O_WRONLY | O_CREAT | O_TRUNC,
+                                 0644);
+
+                if (output_fd < 0) {
+                    perror("open");
+                    syntax_error = true;
+                    break;
+                }
+
+                ++i;
+            }
+
+            else if (tokens[i] == ">>") {
+
+                if (i + 1 >= tokens.size()) {
+                    std::cerr << "syntax error: expected file after '>>'\n";
+                    syntax_error = true;
+                    break;
+                }
+
+                output_fd = open(tokens[i + 1].c_str(),
+                                 O_WRONLY | O_CREAT | O_APPEND,
+                                 0644);
+
+                if (output_fd < 0) {
+                    perror("open");
+                    syntax_error = true;
+                    break;
+                }
+
+                ++i;
+            }
+
+            else {
+                args.push_back(const_cast<char*>(tokens[i].c_str()));
+            }
+        }
+
+        if (syntax_error) {
+            if (input_fd != -1) close(input_fd);
+            if (output_fd != -1) close(output_fd);
+            continue;
+        }
+
+        if (args.empty()) {
+            std::cerr << "invalid null command\n";
+            continue;
+        }
+
         args.push_back(nullptr);
 
         pid_t pid = fork();
@@ -223,16 +296,29 @@ int main() {
         }
 
         if (pid == 0) {
+
+            if (input_fd != -1) {
+                dup2(input_fd, STDIN_FILENO);
+                close(input_fd);
+            }
+
+            if (output_fd != -1) {
+                dup2(output_fd, STDOUT_FILENO);
+                close(output_fd);
+            }
+
             execvp(args[0], args.data());
             perror("execvp");
             exit(EXIT_FAILURE);
         }
 
-        if (!background) {
+        if (input_fd != -1) close(input_fd);
+        if (output_fd != -1) close(output_fd);
+
+        if (!background)
             waitpid(pid, nullptr, 0);
-        } else {
+        else
             std::cout << "[Background PID: " << pid << "]\n";
-        }
     }
 
     return 0;
